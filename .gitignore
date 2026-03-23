@@ -61,3 +61,4 @@ artifactspace/CMakeLists.txt
 artifactspace/.devcontainer/*
 artifactspace/.vscode/*
 artifactspace/build/*
+.vscode/*
