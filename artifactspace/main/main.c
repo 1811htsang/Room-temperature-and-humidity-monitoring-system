@@ -6,10 +6,16 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
+#include "rom/ets_sys.h"
 
 // Khai báo các hằng số sử dụng
 #define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #define SHT30_ADDR 0x44 // Địa chỉ I2C mặc định của cảm biến SHT30
+#define LCD_ADDR 0x27 // Địa chỉ I2C ghi mặc định của màn LCD16X2
+#define LCD_RS_BIT      0x01    // P0
+#define LCD_RW_BIT      0x02    // P1 (Thường nối GND)
+#define LCD_EN_BIT      0x04    // P2
+#define LCD_BL_BIT      0x08    // P3
 
 // Khai báo hàm tính CRC8 cho dữ liệu nhận được từ cảm biến SHT30
 uint8_t crc8(uint8_t *data, int len) {
@@ -22,6 +28,99 @@ uint8_t crc8(uint8_t *data, int len) {
     }
   }
   return crc;
+}
+
+void lcd_send_cmd(i2c_master_dev_handle_t dev_handle, uint8_t cmd) {
+  uint8_t data_u = (cmd & 0xF0);
+  uint8_t data_l = ((cmd << 4) & 0xF0);
+  uint8_t data_t[4];
+
+  data_t[0] = data_u | 0x0C;  // EN=1, RS=0, BL=1
+  data_t[1] = data_u | 0x08;  // EN=0, RS=0, BL=1
+  data_t[2] = data_l | 0x0C;  // EN=1, RS=0, BL=1
+  data_t[3] = data_l | 0x08;  // EN=0, RS=0, BL=1
+
+  i2c_master_transmit(dev_handle, data_t, 4, 1000);
+}
+
+void lcd_send_data(i2c_master_dev_handle_t dev_handle, uint8_t data) {
+  uint8_t data_u = (data & 0xF0);
+  uint8_t data_l = ((data << 4) & 0xF0);
+  uint8_t data_t[4];
+
+  data_t[0] = data_u | 0x0D;  // EN=1, RS=1, BL=1
+  data_t[1] = data_u | 0x09;  // EN=0, RS=1, BL=1
+  data_t[2] = data_l | 0x0D;  // EN=1, RS=1, BL=1
+  data_t[3] = data_l | 0x09;  // EN=0, RS=1, BL=1
+
+  i2c_master_transmit(dev_handle, data_t, 4, 1000);
+}
+
+void lcd_init(i2c_master_dev_handle_t dev_handle) {
+    // 1. Chờ LCD ổn định điện áp (>40ms)
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    lcd_send_cmd(dev_handle, 0x30); // Gửi 0x30 lần 1
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Gửi 0x30 lần 2
+    lcd_send_cmd(dev_handle, 0x30); // Gửi 0x30 lần 2
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Gửi 0x30 lần 3
+    lcd_send_cmd(dev_handle, 0x30); // Gửi 0x30 lần 3
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    // 3. Thiết lập chế độ 4-bit (Gửi 0x20)
+    lcd_send_cmd(dev_handle, 0x20);
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    // 4. Các thiết lập chức năng
+    lcd_send_cmd(dev_handle, 0x28); // Function Set: 4-bit, 2 dòng, font 5x8
+    vTaskDelay(pdMS_TO_TICKS(10));
+    lcd_send_cmd(dev_handle, 0x08); // Display Off
+    vTaskDelay(pdMS_TO_TICKS(10));
+    lcd_send_cmd(dev_handle, 0x01); // Clear Display
+    vTaskDelay(pdMS_TO_TICKS(10));
+    lcd_send_cmd(dev_handle, 0x06); // Entry Mode: Tăng con trỏ, không dịch màn hình
+    vTaskDelay(pdMS_TO_TICKS(10));
+    lcd_send_cmd(dev_handle, 0x0C); // Display On: Hiện màn hình, tắt con trỏ/nháy
+    vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+void lcd_clear(i2c_master_dev_handle_t dev_handle) {
+  lcd_send_cmd(dev_handle, 0x01); // Clear Display
+  vTaskDelay(pdMS_TO_TICKS(100)); // Clear Display cần thời gian lâu
+}
+
+void lcd_put_cur(i2c_master_dev_handle_t dev_handle, uint8_t row, uint8_t col) {
+  switch (row) {
+    case 0:
+      col |= 0x80;
+      break;
+    case 1:
+      col |= 0xC0;
+      break;
+    default:
+      col |= 0x80;
+      break;
+  }
+
+  lcd_send_cmd(dev_handle, col);
+}
+
+void lcd_send_string(i2c_master_dev_handle_t dev_handle, const char *str) {
+  while (*str) {
+    lcd_send_data(dev_handle, (uint8_t)(*str++));
+  }
+}
+
+void lcd_put_str(i2c_master_dev_handle_t dev_handle, const char *str) {
+  lcd_send_string(dev_handle, str);
+}
+
+void lcd_set_cursor(i2c_master_dev_handle_t dev_handle, uint8_t col, uint8_t row) {
+  lcd_put_cur(dev_handle, row, col);
 }
 
 // Hàm main của ứng dụng
@@ -48,26 +147,47 @@ void app_main(void) {
   i2c_master_bus_handle_t bus_handle;
   ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_config, &bus_handle));
 
+  for (int i = 1; i < 127; i++) {
+    esp_err_t res = i2c_master_probe(bus_handle, i, -1);
+    if (res == ESP_OK) {
+      ESP_LOGI("SCAN", "Found device at address: 0x%02x", i);
+    }
+  }
+
   // Cấu hình thiết bị I2C cho cảm biến SHT30
-  i2c_device_config_t dev_cfg = {
+  i2c_device_config_t sht30_cfg = {
     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-    .device_address = 0x44, // SHT3x Address
-    .scl_speed_hz = 200000 // 200 kHz
+    .scl_speed_hz = 200000, // 200 kHz
+    .device_address = SHT30_ADDR
   };
   i2c_master_dev_handle_t sht30_handle;
-  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &sht30_handle));
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &sht30_cfg, &sht30_handle));
+
+  // Cấu hình thiết bị I2C cho màn LCD16X2
+  i2c_device_config_t lcd_cfg = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .scl_speed_hz = 100000, // 200 kHz
+    .device_address = LCD_ADDR
+  };
+  i2c_master_dev_handle_t lcd_handle;
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &lcd_cfg, &lcd_handle));
+  
+  lcd_init(lcd_handle);
+  lcd_set_cursor(lcd_handle, 0, 0);
+  lcd_put_str(lcd_handle, "System start");
+  vTaskDelay(pdMS_TO_TICKS(2000));
 
   uint8_t cmd[2] = {0x2C, 0x0D}; // Command: High Repeatability
   uint8_t data[6];
 
   // Gửi lệnh đọc dữ liệu từ cảm biến SHT30
-  ESP_ERROR_CHECK(i2c_master_transmit(sht30_handle, cmd, 2, -1));
+  ESP_ERROR_CHECK(i2c_master_transmit(sht30_handle, cmd, 2, 1000));
 
   // Đợi một khoảng thời gian để cảm biến có thể trả về dữ liệu
-  vTaskDelay(20 / portTICK_PERIOD_MS); 
+  vTaskDelay(pdMS_TO_TICKS(20));
 
   // Đọc dữ liệu từ cảm biến SHT30
-  ESP_ERROR_CHECK(i2c_master_receive(sht30_handle, data, 6, -1));
+  ESP_ERROR_CHECK(i2c_master_receive(sht30_handle, data, 6, 1000));
 
   // Vòng lặp chính của ứng dụng
   while (1) {
@@ -75,14 +195,14 @@ void app_main(void) {
     ESP_LOGI("main", "Requesting data from SHT30...");
 
     // Gửi lệnh đo (Dùng transmit thay vì ESP_ERROR_CHECK để tránh crash nếu lỏng dây)
-    esp_err_t ret = i2c_master_transmit(sht30_handle, cmd, 2, -1);
-    
+    esp_err_t ret = i2c_master_transmit(sht30_handle, cmd, 2, 1000);
+
     if (ret == ESP_OK) {
       // Đợi cảm biến hoàn thành phép đo (High repeatability cần tối đa 15ms)
       vTaskDelay(pdMS_TO_TICKS(20)); 
 
       // Đọc 6 bytes dữ liệu
-      ret = i2c_master_receive(sht30_handle, data, 6, -1);
+      ret = i2c_master_receive(sht30_handle, data, 6, 1000);
 
       if (ret == ESP_OK) {
         // Kiểm tra CRC cho Nhiệt độ và Độ ẩm
@@ -96,6 +216,18 @@ void app_main(void) {
 
           ESP_LOGI("main", "Temperature: %.2f °C", temp);
           ESP_LOGI("main", "Humidity: %.2f %%", humi);
+
+          // Hiển thị lên LCD
+          lcd_clear(lcd_handle);
+          lcd_set_cursor(lcd_handle, 0, 0);
+          char line1[17];
+          snprintf(line1, sizeof(line1), "Temp: %.2f C", temp);
+          lcd_put_str(lcd_handle, line1);
+          lcd_set_cursor(lcd_handle, 0, 1);
+          char line2[17];
+          snprintf(line2, sizeof(line2), "Humi: %.2f %%", humi);
+          lcd_put_str(lcd_handle, line2);
+
         } else {
           ESP_LOGE("main", "CRC Check Failed!");
         }
