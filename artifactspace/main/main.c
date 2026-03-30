@@ -1,4 +1,7 @@
 #include <stdio.h>
+#include "reset_driver.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "soc/rtc.h"
@@ -9,6 +12,14 @@ static const char *TAG = "CLOCK_TASK";
 
 void app_main(void)
 {
+    printf("\n");
+    printf("====================================\n");
+    printf("ESP32 TEMPERATURE - HUMIDITY CLOCK\n");
+    printf("RESET DRIVER INITIALIZATION\n");
+    printf("====================================\n");
+
+    check_reset_reason();
+
     ESP_LOGI(TAG, "---- BAT DAU THUC HIEN CLOCK TASK ----");
 
     ESP_LOGI(TAG,"Kiem tra nguyen nhan reset");
@@ -61,4 +72,5 @@ void app_main(void)
     ESP_LOGI(TAG,"Clock cho UART1 da duoc tat");
 
     ESP_LOGI(TAG, "---- HOAN THANH CLOCK TASK ----");
+    
 }
