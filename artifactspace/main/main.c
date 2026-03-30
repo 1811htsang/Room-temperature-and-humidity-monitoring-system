@@ -1,12 +1,17 @@
 // Khai báo các thư viện sử dụng
 
 #include <stdio.h>
-#include "sdkconfig.h"
+#include "reset_driver.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "soc/rtc.h"
+#include "esp_private/periph_ctrl.h"
+#include "sdkconfig.h"
 #include "driver/i2c_master.h"
 #include "rom/ets_sys.h"
+
 
 // Khai báo các hằng số sử dụng
 #define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
@@ -16,6 +21,7 @@
 #define LCD_RW_BIT      0x02    // P1 (Thường nối GND)
 #define LCD_EN_BIT      0x04    // P2
 #define LCD_BL_BIT      0x08    // P3
+static const char *TAG = "CLOCK_TASK";
 
 // Khai báo hàm tính CRC8 cho dữ liệu nhận được từ cảm biến SHT30
 uint8_t crc8(uint8_t *data, int len) {
@@ -136,6 +142,73 @@ void app_main(void) {
   // In ra thông báo khi ứng dụng bắt đầu chạy
   ESP_LOGI("main", "Firmware starts running");
 
+  printf("\n");
+  printf("====================================\n");
+  printf("ESP32 TEMPERATURE - HUMIDITY CLOCK\n");
+  printf("RESET DRIVER INITIALIZATION\n");
+  printf("====================================\n");
+
+  check_reset_reason();
+
+  ESP_LOGI(TAG,"Kiem tra nguyen nhan reset");
+  esp_reset_reason_t reason = esp_reset_reason();
+
+  switch(reason)
+  {
+      case ESP_RST_POWERON:
+          ESP_LOGI(TAG,"RESET do POWER ON");
+          break;
+
+      case ESP_RST_SW:
+          ESP_LOGI(TAG,"Reset do Software");
+          break;
+
+      case ESP_RST_PANIC:
+          ESP_LOGI(TAG,"Reset do System Panic");
+          break;
+
+      case ESP_RST_INT_WDT:
+          ESP_LOGI(TAG,"Reset do Watchdog");
+          break;
+
+      default:
+          ESP_LOGI(TAG,"Reset reason khac");
+          break;
+  }
+
+  ESP_LOGI(TAG, "---- BAT DAU THUC HIEN CLOCK TASK ----");
+
+  /**
+   * Ghi chú:
+   * Phần cấu hình của clock có thể được cấu hình sẵn trong menuconfig,
+   * nên có thể sẽ cần chuyển đổi chức năng sang kiểm tra xung clock hoạt động ở bao nhiêu MHz.
+   */
+
+  /* 1. Khoi dong CLOCK HE THONG */
+  rtc_cpu_freq_config_t config;
+
+  rtc_clk_cpu_freq_mhz_to_config(160, &config);
+  rtc_clk_cpu_freq_set_config(&config);
+
+  ESP_LOGI(TAG, "CPU Clock da duoc dat = 160MHz");
+
+  uint32_t apb_freq = rtc_clk_apb_freq_get();
+  ESP_LOGI(TAG,"APB Clock = %lu Hz", apb_freq);
+
+  /* 2. Bat clock cho UART1 */
+  periph_module_enable(PERIPH_UART1_MODULE);
+  ESP_LOGI(TAG,"Clock cho UART1 da duoc bat");
+
+  /* Reset ngoai vi */
+  periph_module_reset(PERIPH_UART1_MODULE);
+  ESP_LOGI(TAG,"UART1 da duoc reset");
+
+  /* 3. Tat clock ngoai vi */
+  periph_module_disable(PERIPH_UART1_MODULE);
+  ESP_LOGI(TAG,"Clock cho UART1 da duoc tat");
+
+  ESP_LOGI(TAG, "---- HOAN THANH CLOCK TASK ----");
+
   // Cấu hình chân I2C cho master
   i2c_master_bus_config_t i2c_bus_config = {
     .clk_source = I2C_CLK_SRC_DEFAULT,
@@ -241,5 +314,6 @@ void app_main(void) {
     // Đợi 30 giây cho lần đọc tiếp theo
     ESP_LOGI("main", "Sleeping for 30 seconds...");
     vTaskDelay(pdMS_TO_TICKS(30000)); 
-  }
+  }    
+       
 }
