@@ -62,3 +62,4 @@ artifactspace/.devcontainer/*
 artifactspace/.vscode/*
 artifactspace/build/*
 .vscode/*
+build/*
