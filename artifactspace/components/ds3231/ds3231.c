@@ -17,8 +17,8 @@ static const char *TAG = "DS3231";
 typedef struct {
     bool               initialized;
     gpio_num_t         int_pin;
-    SemaphoreHandle_t  mutex;
     ds3231_alarm_cb_t  alarm_cb[2];     /* cb[0] = alarm1, cb[1] = alarm2 */
+    SemaphoreHandle_t  mutex;            /* Mutex bảo vệ truy cập I2C và trạng thái nội bộ */
     void              *alarm_cb_arg[2];
 } ds3231_dev_t;
 
@@ -78,23 +78,13 @@ esp_err_t ds3231_init(const ds3231_config_t *cfg)
 
     /* Cấu hình mặc định */
     s_dev.int_pin = (cfg && cfg->int_pin >= 0) ? cfg->int_pin : GPIO_NUM_NC;
-    bool use_mutex = (cfg == NULL) ? true : cfg->use_mutex;
-
-    /* Tạo mutex */
-    if (use_mutex) {
-        s_dev.mutex = xSemaphoreCreateMutex();
-        if (!s_dev.mutex) {
-            ESP_LOGE(TAG, "Failed to create mutex");
-            return ESP_ERR_NO_MEM;
-        }
-    }
 
     /* Kiểm tra kết nối DS3231 */
     uint8_t ctrl = 0;
     esp_err_t ret = i2c_hal_read_reg(DS3231_I2C_ADDR, DS3231_REG_CONTROL, &ctrl);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "DS3231 not found on I2C bus! Check wiring.");
-        goto fail;
+        return ret;
     }
 
     /* Bật oscillator (xóa bit EOSC = 0), bật INTCN */
@@ -128,7 +118,6 @@ esp_err_t ds3231_init(const ds3231_config_t *cfg)
     return ESP_OK;
 
 fail:
-    if (s_dev.mutex) { vSemaphoreDelete(s_dev.mutex); s_dev.mutex = NULL; }
     return ret;
 }
 
@@ -138,10 +127,6 @@ esp_err_t ds3231_deinit(void)
 
     if (s_dev.int_pin != GPIO_NUM_NC) {
         gpio_isr_handler_remove(s_dev.int_pin);
-    }
-    if (s_dev.mutex) {
-        vSemaphoreDelete(s_dev.mutex);
-        s_dev.mutex = NULL;
     }
     memset(&s_dev, 0, sizeof(s_dev));
     return ESP_OK;
@@ -156,9 +141,7 @@ esp_err_t ds3231_get_time(ds3231_time_t *t)
     if (!s_dev.initialized) return ESP_ERR_INVALID_STATE;
 
     uint8_t buf[7];
-    LOCK();
     esp_err_t ret = i2c_hal_read_burst(DS3231_I2C_ADDR, DS3231_REG_SECONDS, buf, 7);
-    UNLOCK();
 
     if (ret != ESP_OK) return ret;
 
@@ -198,7 +181,6 @@ esp_err_t ds3231_set_time(const ds3231_time_t *t)
     buf[5] = dec2bcd(t->month) | century;
     buf[6] = dec2bcd((uint8_t)(t->year % 100));
 
-    LOCK();
     esp_err_t ret = i2c_hal_write_burst(DS3231_I2C_ADDR, DS3231_REG_SECONDS, buf, 7);
 
     if (ret == ESP_OK) {
@@ -208,8 +190,6 @@ esp_err_t ds3231_set_time(const ds3231_time_t *t)
         status &= ~DS3231_STAT_OSF;
         i2c_hal_write_reg(DS3231_I2C_ADDR, DS3231_REG_STATUS, status);
     }
-    UNLOCK();
-
     return ret;
 }
 
@@ -222,9 +202,7 @@ esp_err_t ds3231_get_temperature(float *temp_c)
     if (!s_dev.initialized) return ESP_ERR_INVALID_STATE;
 
     uint8_t buf[2];
-    LOCK();
     esp_err_t ret = i2c_hal_read_burst(DS3231_I2C_ADDR, DS3231_REG_TEMP_MSB, buf, 2);
-    UNLOCK();
 
     if (ret != ESP_OK) return ret;
 
