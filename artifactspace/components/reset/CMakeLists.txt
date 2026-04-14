@@ -1,4 +1,4 @@
 idf_component_register(
-    SRCS "reset_driver.c"
+    SRCS "reset.c"
     INCLUDE_DIRS "."
 )
