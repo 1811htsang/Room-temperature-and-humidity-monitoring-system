@@ -1,4 +1,18 @@
-// Khai báo các thư viện sử dụng
+/**
+ * @file main.C
+ * @author Huynh Thanh Sang
+ * @brief Firmware chính của dự án, thực hiện các chức năng sau:
+ * @version 0.1
+ * @date 2026-05-01
+ * 
+ * @copyright GNU GENERAL PUBLIC LICENSE Version 3 (GPLv3) - https://www.gnu.org/licenses/gpl-3.0.en.html
+ * 
+ */
+
+/**
+ * @brief Khai báo các thư viện sử dụng
+ */
+
 #include <stdio.h>
 #include <string.h>
 #include "reset.h"
@@ -14,7 +28,10 @@
 #include "esp_clk_tree.h"
 #include "lcd.h"
 
-// Khai báo các hằng số sử dụng
+/**
+ * @brief Định nghĩa các hằng số và cấu trúc dữ liệu cần thiết cho ứng dụng
+ */
+
 #define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #define SHT30_ADDR 0x44 // Địa chỉ I2C mặc định của cảm biến SHT30
 #define LCD_ADDR 0x27 // Địa chỉ I2C ghi mặc định của màn LCD16X2
@@ -23,7 +40,12 @@
 #define LCD_EN_BIT      0x04    // P2
 #define LCD_BL_BIT      0x08    // P3
 
-// Khai báo hàm tính CRC8 cho dữ liệu nhận được từ cảm biến SHT30
+/**
+ * @brief Hàm tính CRC8
+ * @param data Dữ liệu cần tính CRC
+ * @param len Độ dài của dữ liệu
+ * @return uint8_t Giá trị CRC8 tính được
+ */
 uint8_t crc8(uint8_t *data, int len) {
   uint8_t crc = 0xFF;
   for (int j = 0; j < len; j++) {
@@ -36,16 +58,10 @@ uint8_t crc8(uint8_t *data, int len) {
   return crc;
 }
 
-// Hàm main của ứng dụng
 /**
- * Ghi chú:
- * Cấu hình chân trên mạch thực tế như sau:
- * - SCL chân D22
- * - SDA chân D21
- * - VCC chân 3.3V
- * - GND chân GND
+ * @brief Hàm lấy thông tin tần số clock của CPU
  */
-void configure_clock(void) {
+void get_clock(void) {
     uint32_t cpu_freq_mhz = 0;
     ESP_ERROR_CHECK(esp_clk_tree_src_get_freq_hz(
         SOC_MOD_CLK_CPU, 
@@ -55,31 +71,15 @@ void configure_clock(void) {
     ESP_LOGI("main", "CPU frequency: %u Hz (~%u MHz)", cpu_freq_mhz, cpu_freq_mhz / 1000000U);
 }
 
+/**
+ * @brief Hàm chính của ứng dụng
+ */
 void app_main(void) {
-  // In ra thông báo khi ứng dụng bắt đầu chạy
   ESP_LOGI("main", "Firmware starts running");
 
-  // Kiểm tra nguyên nhân reset
   check_reset_reason();
 
-  // Configure clock
-  configure_clock();
-
-  /**
-   * Ghi chú:
-   * Phần cấu hình của clock có thể được cấu hình sẵn trong menuconfig,
-   * nên có thể sẽ cần chuyển đổi chức năng sang kiểm tra xung clock hoạt động ở bao nhiêu MHz.
-   */
-
-  // Lấy tần số CPU hiện tại để xác nhận clock đang hoạt động
-
-  uint32_t cpu_freq_mhz = 0;
-  ESP_ERROR_CHECK(esp_clk_tree_src_get_freq_hz(
-    SOC_MOD_CLK_CPU, 
-    ESP_CLK_TREE_SRC_FREQ_PRECISION_EXACT, 
-    &cpu_freq_mhz)
-  );
-  ESP_LOGI("main", "CPU frequency: %u Hz (~%u MHz)", cpu_freq_mhz, cpu_freq_mhz / 1000000U);
+  get_clock();
 
   // Cấu hình chân I2C cho master
   i2c_master_bus_config_t i2c_bus_config = {
