@@ -15,7 +15,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "reset.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -26,14 +25,16 @@
 #include "driver/i2c_master.h"
 #include "rom/ets_sys.h"
 #include "esp_clk_tree.h"
+#include "reset.h"
+#include "ds3231.h"
 #include "lcd.h"
 
 /**
  * @brief Định nghĩa các hằng số và cấu trúc dữ liệu cần thiết cho ứng dụng
  */
 
-#define LOG_LOCAL_LEVEL ESP_LOG_VERBOSE
 #define SHT30_ADDR 0x44 // Địa chỉ I2C mặc định của cảm biến SHT30
+#define RTC_ADDR 0x68   // Địa chỉ I2C của DS3231
 #define LCD_ADDR 0x27 // Địa chỉ I2C ghi mặc định của màn LCD16X2
 #define LCD_RS_BIT      0x01    // P0
 #define LCD_RW_BIT      0x02    // P1 (Thường nối GND)
@@ -56,6 +57,47 @@ uint8_t crc8(uint8_t *data, int len) {
     }
   }
   return crc;
+}
+
+static uint8_t bcd_to_dec(uint8_t value) {
+  return (uint8_t)(((value >> 4) * 10U) + (value & 0x0F));
+}
+
+static esp_err_t read_ds3231_time(i2c_master_dev_handle_t rtc_handle, ds3231_time_t *now) {
+  if (!rtc_handle || !now) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint8_t reg = 0x00;
+  uint8_t raw[7] = {0};
+  esp_err_t ret = i2c_master_transmit_receive(rtc_handle, &reg, 1, raw, sizeof(raw), 1000);
+  if (ret != ESP_OK) {
+    return ret;
+  }
+
+  now->second = bcd_to_dec(raw[0] & 0x7F);
+  now->minute = bcd_to_dec(raw[1] & 0x7F);
+
+  if (raw[2] & 0x40) {
+    uint8_t hour = bcd_to_dec(raw[2] & 0x1F);
+    bool is_pm = (raw[2] & 0x20) != 0;
+    if (hour == 12) {
+      hour = 0;
+    }
+    if (is_pm) {
+      hour = (uint8_t)(hour + 12U);
+    }
+    now->hour = hour;
+  } else {
+    now->hour = bcd_to_dec(raw[2] & 0x3F);
+  }
+
+  now->day_of_week = raw[3] & 0x07;
+  now->date = bcd_to_dec(raw[4] & 0x3F);
+  now->month = bcd_to_dec(raw[5] & 0x1F);
+  now->year = (uint16_t)(2000U + bcd_to_dec(raw[6]));
+
+  return ESP_OK;
 }
 
 /**
@@ -108,6 +150,15 @@ void app_main(void) {
   i2c_master_dev_handle_t sht30_handle;
   ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &sht30_cfg, &sht30_handle));
 
+  // Cấu hình thiết bị I2C cho đồng hồ thời gian thực DS3231
+  i2c_device_config_t rtc_cfg = {
+    .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+    .scl_speed_hz = 100000,
+    .device_address = RTC_ADDR
+  };
+  i2c_master_dev_handle_t rtc_handle;
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &rtc_cfg, &rtc_handle));
+
   // Cấu hình thiết bị I2C cho màn LCD16X2
   i2c_device_config_t lcd_cfg = {
     .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -125,66 +176,84 @@ void app_main(void) {
 
   uint8_t cmd[2] = {0x2C, 0x0D}; // Command: High Repeatability
   uint8_t data[6];
-
-  // Gửi lệnh đọc dữ liệu từ cảm biến SHT30
-  ESP_ERROR_CHECK(i2c_master_transmit(sht30_handle, cmd, 2, 1000));
-
-  // Đợi một khoảng thời gian để cảm biến có thể trả về dữ liệu
-  vTaskDelay(pdMS_TO_TICKS(20));
-
-  // Đọc dữ liệu từ cảm biến SHT30
-  ESP_ERROR_CHECK(i2c_master_receive(sht30_handle, data, 6, 1000));
+  float last_temp = 0.0f;
+  float last_humi = 0.0f;
+  bool have_sensor_data = false;
+  bool have_displayed_time = false;
+  uint8_t last_display_hour = 0;
+  uint8_t last_display_minute = 0;
 
   // Vòng lặp chính của ứng dụng
   while (1) {
     ESP_LOGI("main", "----------------------------");
-    ESP_LOGI("main", "Requesting data from SHT30...");
+    ESP_LOGI("main", "Polling RTC for time change...");
 
-    // Gửi lệnh đo (Dùng transmit thay vì ESP_ERROR_CHECK để tránh crash nếu lỏng dây)
-    esp_err_t ret = i2c_master_transmit(sht30_handle, cmd, 2, 1000);
+    ds3231_time_t now;
+    bool rtc_ok = (read_ds3231_time(rtc_handle, &now) == ESP_OK);
 
-    if (ret == ESP_OK) {
-      // Đợi cảm biến hoàn thành phép đo (High repeatability cần tối đa 15ms)
-      vTaskDelay(pdMS_TO_TICKS(20)); 
+    if (rtc_ok) {
+      if (!have_displayed_time || now.hour != last_display_hour || now.minute != last_display_minute) {
+        ESP_LOGI("main", "Time changed: %02u:%02u", now.hour, now.minute);
 
-      // Đọc 6 bytes dữ liệu
-      ret = i2c_master_receive(sht30_handle, data, 6, 1000);
+        // Gửi lệnh đo (Dùng transmit thay vì ESP_ERROR_CHECK để tránh crash nếu lỏng dây)
+        esp_err_t ret = i2c_master_transmit(sht30_handle, cmd, 2, 1000);
 
-      if (ret == ESP_OK) {
-        // Kiểm tra CRC cho Nhiệt độ và Độ ẩm
-        if (crc8(data, 2) == data[2] && crc8(data + 3, 2) == data[5]) {
-          // Chuyển đổi giá trị Raw sang Vật lý theo công thức Datasheet
-          uint16_t raw_temp = (data[0] << 8) | data[1];
-          uint16_t raw_humi = (data[3] << 8) | data[4];
+        if (ret == ESP_OK) {
+          // Đợi cảm biến hoàn thành phép đo (High repeatability cần tối đa 15ms)
+          vTaskDelay(pdMS_TO_TICKS(20));
 
-          float temp = -45.0 + (175.0 * (float)raw_temp / 65535.0);
-          float humi = 100.0 * ((float)raw_humi / 65535.0);
+          // Đọc 6 bytes dữ liệu
+          ret = i2c_master_receive(sht30_handle, data, 6, 1000);
 
-          ESP_LOGI("main", "Temperature: %.2f °C", temp);
-          ESP_LOGI("main", "Humidity: %.2f %%", humi);
+          if (ret == ESP_OK) {
+            // Kiểm tra CRC cho Nhiệt độ và Độ ẩm
+            if (crc8(data, 2) == data[2] && crc8(data + 3, 2) == data[5]) {
+              // Chuyển đổi giá trị Raw sang Vật lý theo công thức Datasheet
+              uint16_t raw_temp = (data[0] << 8) | data[1];
+              uint16_t raw_humi = (data[3] << 8) | data[4];
 
-          // Hiển thị lên LCD
-          lcd_clear(lcd_handle);
-          lcd_set_cursor(lcd_handle, 0, 0);
-          char line1[17];
-          snprintf(line1, sizeof(line1), "Temp: %.2f C", temp);
-          lcd_put_str(lcd_handle, line1);
-          lcd_set_cursor(lcd_handle, 0, 1);
-          char line2[17];
-          snprintf(line2, sizeof(line2), "Humi: %.2f %%", humi);
-          lcd_put_str(lcd_handle, line2);
+              last_temp = -45.0f + (175.0f * (float)raw_temp / 65535.0f);
+              last_humi = 100.0f * ((float)raw_humi / 65535.0f);
+              have_sensor_data = true;
+
+              ESP_LOGI("main", "Temperature: %.2f °C", last_temp);
+              ESP_LOGI("main", "Humidity: %.2f %%", last_humi);
+            } else {
+              ESP_LOGE("main", "CRC Check Failed!");
+            }
+          } else {
+            ESP_LOGE("main", "I2C Receive Failed!");
+          }
         } else {
-          ESP_LOGE("main", "CRC Check Failed!");
+          ESP_LOGE("main", "I2C Transmit Failed! Check connection.");
         }
-      } else {
-        ESP_LOGE("main", "I2C Receive Failed!");
+
+        lcd_clear(lcd_handle);
+
+        char line1[17];
+        snprintf(line1, sizeof(line1), "%02u:%02u %02u/%02u",
+                 now.hour, now.minute, now.date, now.month);
+        lcd_set_cursor(lcd_handle, 0, 0);
+        lcd_put_str(lcd_handle, line1);
+
+        char line2[17];
+        if (have_sensor_data) {
+          snprintf(line2, sizeof(line2), "T:%.1fC H:%.1f%%", last_temp, last_humi);
+        } else {
+          snprintf(line2, sizeof(line2), "SHT30 read fail");
+        }
+        lcd_set_cursor(lcd_handle, 0, 1);
+        lcd_put_str(lcd_handle, line2);
+
+        last_display_hour = now.hour;
+        last_display_minute = now.minute;
+        have_displayed_time = true;
       }
     } else {
-      ESP_LOGE("main", "I2C Transmit Failed! Check connection.");
+      ESP_LOGE("main", "RTC read failed!");
     }
 
-    // Đợi 30 giây cho lần đọc tiếp theo
-    ESP_LOGI("main", "Sleeping for 30 seconds...");
-    vTaskDelay(pdMS_TO_TICKS(30000)); 
+    // Poll nhanh để bắt ngay khi phút thay đổi, nhưng không gây tải lớn
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
