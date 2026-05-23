@@ -52,6 +52,8 @@ idf_component_register(
     esp_timer                   # Cần cho ciedpc_timer_tick
     driver                      # Cần cho GPIO/UART/I2C
     freertos                    # Cần cho task/sleep
+    log
+    lib_lcd
   WHOLE_ARCHIVE
 )
 
