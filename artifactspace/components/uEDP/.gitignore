@@ -54,11 +54,14 @@ dkms.conf
 # debug information files
 *.dwo
 
-# artifactspace 
-artifactspace/main/CMakeLists.txt
-artifactspace/.clangd
-artifactspace/CMakeLists.txt
-artifactspace/.devcontainer/*
-artifactspace/.vscode/*
-artifactspace/build/*
-.vscode/*
+# Obsidian vault
+sketch/.obsidian
+
+# Test build output
+sources/test/*/build/
+
+# VSCode settings
+.vscode/settings.json
+
+# Test build folder
+sources/test/*
